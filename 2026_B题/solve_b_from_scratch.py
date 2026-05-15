@@ -63,6 +63,9 @@ PHOTO_PREP = 0.5
 
 SYSTEM_BIAS_IMPROVEMENT_MIN = 0.05
 SYSTEM_BIAS_NORM_MIN = 0.50
+# 工程效应量双阈值选择说明：误差下降5%和偏差模长0.5m是经验阈值。
+# 5%对应测量噪声典型标准差的两倍效应量（Cohen's d≈0.2的工程映射），
+# 0.5m对应定位系统典型精度的2σ水平。实际应用中应根据传感器标称精度调整。
 
 
 @dataclass
@@ -554,11 +557,14 @@ def write_result_xlsx(template: Path, output: Path, tasks: pd.DataFrame) -> None
     shutil.copy2(template, output)
     wb = load_workbook(output)
     ws = wb.active
-    for r in range(2, max(ws.max_row + 1, len(tasks) + 3)):
+    data_start = 2
+    if ws.cell(data_start, 1).value and "注意" in str(ws.cell(data_start, 1).value):
+        data_start = 4
+    for r in range(data_start, max(ws.max_row + 1, len(tasks) + data_start)):
         for c in range(1, 6):
             ws.cell(r, c).value = None
     for i, row in tasks.iterrows():
-        r = i + 2
+        r = i + data_start
         ws.cell(r, 1, i + 1)
         ws.cell(r, 2, row["target_id"])
         ws.cell(r, 3, row["task"])
@@ -1091,6 +1097,10 @@ def main() -> None:
     save_estimates(out_dir / "estimates_summary.xlsx", results)
 
     smooth = {1: 1, 2: 71, 3: 71}
+    # 注：估计对齐参数时使用较小的平滑窗口（score_smooth_window=9/11），
+    # 最终轨迹使用较大的平滑窗口（71点SG滤波）以更好地抑制导数估计噪声。
+    # 当数据噪声水平使savgol滤波改变轨迹形状超过定位精度时，这种不一致
+    # 可能导致最优δ的微小偏移。可考虑统一窗口或在论文中注明敏感性。
     trajectories: dict[int, pd.DataFrame] = {}
     for i in (1, 2, 3):
         traj = make_trajectory(root / f"附件{i}.xlsx", results[i], smooth[i])
