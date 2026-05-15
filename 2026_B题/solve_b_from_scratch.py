@@ -283,8 +283,11 @@ def build_alignment_results(root: Path) -> dict[int, AlignmentResult]:
     imp3 = (mse3_nb - mse3_b) / mse3_nb
     f3, p3, stat3 = nested_f_test(mse3_nb, mse3_b, n3)
     bias_norm3 = float(np.linalg.norm(b3))
-    practical3 = bool(stat3 and imp3 >= SYSTEM_BIAS_IMPROVEMENT_MIN and bias_norm3 >= SYSTEM_BIAS_NORM_MIN)
-    if practical3:
+    # 问题3要求：先判断是否存在系统偏差，再完成问题2任务。
+    # 存在性由F检验回答（α=0.05）：p < 0.05 → 拒绝H0 → 偏差存在。
+    # 工程效应量（误差下降≥5%且模长≥0.5m）作为附加说明，
+    # 不影响"是否存在"的判断，仅在讨论中注明修正量级较小。
+    if stat3:
         d3, b3_used, mse3, ov3, n3_used = d3_b, b3, mse3_b, ov3_b, n3
     else:
         d3, b3_used, mse3, ov3, n3_used = d3_nb, np.zeros(2), mse3_nb, ov3_nb, n3_nb
@@ -302,8 +305,8 @@ def build_alignment_results(root: Path) -> dict[int, AlignmentResult]:
         n_overlap=n3_used,
         f_stat=f3,
         f_p_value=p3,
-        statistical_bias=stat3,
-        practical_bias=practical3,
+        statistical_bias=bool(stat3),
+        practical_bias=bool(stat3 and imp3 >= SYSTEM_BIAS_IMPROVEMENT_MIN and bias_norm3 >= SYSTEM_BIAS_NORM_MIN),
         ci_delta_lo=ci3[0],
         ci_delta_hi=ci3[1],
         candidate_delta_s=d3_b,
@@ -701,7 +704,7 @@ def build_report_markdown(
 
 ## 摘要
 
-针对两种异频异步定位方式，本文建立“时间平移—固定偏差估计—10Hz重采样融合”的多源定位模型。问题1在无噪声条件下，以方式1为基准得到方式2相对时间偏差为 {r1.delta_s:.4f}s，时间平移后两轨迹均方残差接近0。问题2在随机噪声和固定系统偏差并存条件下，估计方式2相对时间偏差为 {r2.delta_s:.4f}s，95%置信区间为 [{r2.ci_delta_lo:.4f},{r2.ci_delta_hi:.4f}]s，方式2相对方式1的固定坐标偏差为 ({r2.bias_x_m:.4f},{r2.bias_y_m:.4f})m。问题3实测数据中，带偏差模型候选偏差为 ({r3.candidate_bias_x_m:.4f},{r3.candidate_bias_y_m:.4f})m，误差下降比例为 {100*r3.improvement_ratio:.2f}%；尽管大样本F检验可检出微小均值漂移（F={r3.f_stat:.2f}, p={r3.f_p_value:.4g}），但其幅值和误差改善均低于工程效应量阈值，因此不采用固定系统偏差修正。问题4在附件3融合轨迹上生成可行任务候选，并用0-1整数规划最大化期望完成数，得到 {len(tasks)} 项非重叠任务，其中模拟射击 {shoot_count} 项、拍照 {photo_count} 项，期望完成数为 {expected:.2f}。全部任务满足距离、速度、加速度、准备时间和拍照角度约束。
+针对两种异频异步定位方式，本文建立“时间平移—固定偏差估计—10Hz重采样融合”的多源定位模型。问题1在无噪声条件下，以方式1为基准得到方式2相对时间偏差为 {r1.delta_s:.4f}s，时间平移后两轨迹均方残差接近0。问题2在随机噪声和固定系统偏差并存条件下，估计方式2相对时间偏差为 {r2.delta_s:.4f}s，95%置信区间为 [{r2.ci_delta_lo:.4f},{r2.ci_delta_hi:.4f}]s，方式2相对方式1的固定坐标偏差为 ({r2.bias_x_m:.4f},{r2.bias_y_m:.4f})m。问题3实测数据经F检验，在α=0.05水平上检出系统偏差（F={r3.f_stat:.2f}, p={r3.f_p_value:.4g}），偏差估计值为 ({r3.bias_x_m:.4f},{r3.bias_y_m:.4f})m；偏差模长0.257m、误差改善1.65%，虽量级较小，仍按统计结论予以修正。问题4在附件3融合轨迹上生成可行任务候选，并用0-1整数规划最大化期望完成数，得到 {len(tasks)} 项非重叠任务，其中模拟射击 {shoot_count} 项、拍照 {photo_count} 项，期望完成数为 {expected:.2f}。全部任务满足距离、速度、加速度、准备时间和拍照角度约束。
 
 **关键词：** 多源定位；时间同步；系统偏差；10Hz重采样；整数规划；任务优化
 
@@ -777,7 +780,7 @@ $$
 |---|---:|---:|---:|---:|---:|---:|---:|---|
 | 1 | {r1.delta_s:.4f} | -- | 0 | 0 | -- | -- | -- | 无 |
 | 2 | {r2.delta_s:.4f} | [{r2.ci_delta_lo:.4f},{r2.ci_delta_hi:.4f}] | {r2.bias_x_m:.4f} | {r2.bias_y_m:.4f} | {r2.bias_x_m:.4f} | {r2.bias_y_m:.4f} | {100*r2.improvement_ratio:.2f}% | 存在并修正 |
-| 3 | {r3.delta_s:.4f} | [{r3.ci_delta_lo:.4f},{r3.ci_delta_hi:.4f}] | 0 | 0 | {r3.candidate_bias_x_m:.4f} | {r3.candidate_bias_y_m:.4f} | {100*r3.improvement_ratio:.2f}% | 工程量级不足，不修正 |
+| 3 | {r3.delta_s:.4f} | [{r3.ci_delta_lo:.4f},{r3.ci_delta_hi:.4f}] | {r3.bias_x_m:.4f} | {r3.bias_y_m:.4f} | {r3.candidate_bias_x_m:.4f} | {r3.candidate_bias_y_m:.4f} | {100*r3.improvement_ratio:.2f}% | 存在并修正（量级较小） |
 
 ### 6.2 分题轨迹图
 
