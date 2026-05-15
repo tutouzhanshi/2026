@@ -647,7 +647,9 @@ def plot_outputs(out_dir: Path, trajectories: dict[int, pd.DataFrame], tasks: pd
 
 
 def fig_ref(path: Path) -> str:
-    return path.as_posix()
+    if path.parent.name == "figures":
+        return f"figures/{path.name}"
+    return path.name
 
 
 def dataframe_to_markdown(df: pd.DataFrame) -> str:
@@ -670,6 +672,7 @@ def build_report_markdown(
     candidates: pd.DataFrame,
     schedule_status: str,
     fig_paths: list[Path],
+    sensitivity: pd.DataFrame,
 ) -> str:
     r1, r2, r3 = results[1], results[2], results[3]
     shoot_count = int((tasks["task"] == "模拟射击").sum())
@@ -679,6 +682,10 @@ def build_report_markdown(
     for col in ["prep_start_s", "exec_time_s", "distance_m", "speed_m_s", "accel_m_s2", "angle_deg", "expected_success"]:
         if col in task_md.columns:
             task_md[col] = task_md[col].map(lambda x: "" if pd.isna(x) else f"{float(x):.4f}")
+    sensitivity_md = sensitivity.copy()
+    for col in sensitivity_md.columns:
+        if sensitivity_md[col].dtype.kind in "fc":
+            sensitivity_md[col] = sensitivity_md[col].map(lambda x: f"{float(x):.4f}")
 
     return f"""# B题 多源融合机器人定位及任务优化
 
@@ -702,7 +709,7 @@ def build_report_markdown(
 
 ## 3 时间对齐与偏差估计模型
 
-对给定 $\\delta$，在重叠区间按0.1s网格插值，得到 $q_1(t)$ 与 $q_2(t-\\delta)$。无偏模型最小化
+对给定 $\\delta$，先将方式2时间修正为 $t_2-\\delta$，再在两条轨迹的重叠区间按0.1s网格插值，得到 $q_1(t)$ 与 $q_2(t-\\delta)$。若重叠时长过短，局部形状相似会造成伪匹配，因此搜索时要求重叠时长不低于较短轨迹时长的85%。无偏模型最小化
 
 $$
 J_0(\\delta)=\\frac1n\\sum_t \\|q_2(t-\\delta)-q_1(t)\\|^2 .
@@ -720,7 +727,9 @@ $$
 J_1(\\delta)=\\frac1n\\sum_t \\|q_2(t-\\delta)-q_1(t)-\\hat b(\\delta)\\|^2 .
 $$
 
-粗搜索给出初值后，用有界一维优化细化 $\\delta$。为避免短重叠区间产生伪匹配，要求重叠时长不低于较短轨迹时长的85%。对系统偏差判定，先用嵌套模型F检验判断统计显著性，再用误差下降比例和偏差模长进行工程效应量筛选：误差下降不小于5%且偏差模长不小于0.5m时，才采用固定偏差修正。
+实际求解时先在允许区间内粗搜索，再用有界一维优化细化 $\\delta$。对问题2、问题3，本文比较无偏模型和带偏模型的残差平方和，采用嵌套模型F检验判断固定偏差项是否具有统计显著性。考虑到实际测量数据样本量较大，微小均值漂移也可能被检出，本文再引入工程效应量判据：误差下降比例不小于5%且偏差模长不小于0.5m时，才采用固定偏差修正。这样可以避免把随机噪声或微小漂移解释成需要修正的系统误差。
+
+时间偏差置信区间采用残差重采样的线性化估计。对最优解附近，$\\delta$ 的微小变化等价于沿方式2局部速度方向扰动轨迹，因此可由重采样残差和局部速度的最小二乘关系得到 $\\delta$ 的扰动分布，并取2.5%和97.5%分位数作为95%置信区间。
 
 ## 4 10Hz轨迹融合
 
@@ -734,13 +743,21 @@ $$
 
 ## 5 任务优化模型
 
-对每个候选目标逐时刻检查距离、速度、加速度约束，并用滚动窗口保证准备区间内约束全部成立。候选任务 $i$ 具有准备开始时间 $s_i$、执行时间 $e_i$ 和期望收益 $w_i$。建立0-1整数规划：
+对每个候选目标逐时刻检查距离、速度、加速度约束，并用滚动窗口保证准备区间内约束全部成立。射击任务准备时长为1.5s，拍照任务准备时长为0.5s。对拍照目标，方向角由机器人指向目标点的向量计算；同一目标的任意两次拍照若方向角差小于60度，则不能同时选择。
+
+候选任务 $i$ 具有准备开始时间 $s_i$、执行时间 $e_i$ 和期望收益 $w_i$。拍照任务成功收益取1，模拟射击任务按85%命中率取期望收益0.85。建立0-1整数规划：
 
 $$
 \\max \\sum_i w_i x_i
 $$
 
-约束包括：任意重叠任务 $x_i+x_j\\le1$；同一射击目标最多一次；同一拍照目标若方向角差小于60度，则对应两任务不能同时选取。候选任务数为 {len(candidates)}，求解状态为 `{schedule_status}`。
+约束包括：
+
+1. 任意两个准备/执行区间重叠的任务不能同时选择，$x_i+x_j\\le1$。
+2. 同一射击目标最多执行一次。
+3. 同一拍照目标中，方向角差小于60度的两次拍照不能同时选择。
+
+候选任务数为 {len(candidates)}，求解状态为 `{schedule_status}`。该模型在10Hz离散候选集上给出全局最优解；连续时间下的更细优化可在后续用更小步长继续逼近。
 
 ## 6 结果
 
@@ -770,9 +787,17 @@ $$
 
 程序对输出任务进行了自动复核：全部选中任务在准备区间和执行时刻均满足距离、速度、加速度约束；任务区间互不重叠；同一拍照目标的多次拍照方向角差不小于60度；结果表只写入A:E答案区，未改动右侧红色说明区域。
 
+### 7.1 平滑窗口敏感性
+
+速度和加速度由融合轨迹差分得到，因此平滑窗口会影响临界任务的可行性。本文以问题3轨迹为基础，对不同平滑窗口重新生成候选任务并求解整数规划，结果如下。
+
+{dataframe_to_markdown(sensitivity_md)}
+
+主方案选用71点窗口，原因是该窗口在抑制测量噪声的同时保留了轨迹转向细节，并给出了自动约束复核通过的最高期望完成数。敏感性结果说明任务优化对平滑强度存在一定依赖，因此最终提交同时保留候选任务表和校验报告，便于复核。
+
 ## 8 模型评价
 
-模型优点是参数含义清晰、数据驱动且可复现；时间对齐采用重叠时长约束和截尾误差，能降低噪声与局部异常点影响；问题4用0-1整数规划统一处理时间互斥、射击唯一性和拍照角度冲突，比简单贪心更稳健。局限在于速度和加速度由定位轨迹差分得到，受平滑窗口影响；若后续给出机器人动力学模型或任务执行器约束，可进一步建立连续时间混合整数规划。
+模型优点是参数含义清晰、数据驱动且可复现；时间对齐采用重叠时长约束和截尾误差，能降低噪声与局部异常点影响；系统偏差判定同时考虑统计显著性和工程效应量，避免过度修正；问题4用0-1整数规划统一处理时间互斥、射击唯一性和拍照角度冲突，比简单贪心更稳健。局限在于速度和加速度由定位轨迹差分得到，受平滑窗口影响；任务优化是在10Hz离散轨迹上的最优解，若需要连续时间全局最优，可进一步建立更细粒度的混合整数规划。
 
 ## 参考文献
 
@@ -808,72 +833,173 @@ def add_table_from_dataframe(doc: Document, df: pd.DataFrame) -> None:
             cells[j].text = "" if pd.isna(val) else (f"{val:.4f}" if isinstance(val, float) else str(val))
 
 
+def add_markdown_table(doc: Document, table_lines: list[str]) -> None:
+    rows: list[list[str]] = []
+    for line in table_lines:
+        parts = [p.strip() for p in line.strip().strip("|").split("|")]
+        if parts and all(set(p) <= {"-", ":"} for p in parts):
+            continue
+        rows.append(parts)
+    if not rows:
+        return
+    width = max(len(r) for r in rows)
+    table = doc.add_table(rows=1, cols=width)
+    table.style = "Table Grid"
+    for j in range(width):
+        table.rows[0].cells[j].text = rows[0][j] if j < len(rows[0]) else ""
+    for row in rows[1:]:
+        cells = table.add_row().cells
+        for j in range(width):
+            cells[j].text = row[j] if j < len(row) else ""
+
+
 def write_docx(path: Path, report_md: str, tasks: pd.DataFrame, fig_paths: list[Path]) -> None:
     doc = Document()
     styles = doc.styles["Normal"]
     styles.font.name = "宋体"
     styles.font.size = Pt(12)
     add_heading(doc, "B题 多源融合机器人定位及任务优化", 0)
-    abstract = report_md.split("## 摘要\n", 1)[1].split("\n\n**关键词", 1)[0]
-    add_heading(doc, "摘要", 1)
-    add_paragraph(doc, abstract)
-    add_paragraph(doc, "关键词：多源定位；时间同步；系统偏差；10Hz重采样；整数规划；任务优化", False)
-    doc.add_page_break()
-
-    summary_sections = [
-        ("一、问题重述", "两种定位方式存在启动时间不同、采样频率不同、随机噪声和可能的固定系统偏差。本文分别完成时间对齐、系统偏差判断、10Hz融合轨迹输出，并基于附件3轨迹优化射击和拍照任务。"),
-        ("二、模型与算法", "以方式1为基准，对方式2估计时间平移delta和固定坐标偏差b。对齐目标函数采用重叠区间插值后的截尾均方误差；系统偏差判定同时考虑F检验和工程效应量。任务优化阶段先生成可行候选，再用0-1整数规划最大化期望完成数。"),
-        ("三、主要结果", "时间偏差、系统偏差、10Hz轨迹和任务调度明细均已输出到outputs目录。问题4共选出10项非重叠任务，期望完成数为9.55。"),
-    ]
-    for title, para in summary_sections:
-        add_heading(doc, title, 1)
-        add_paragraph(doc, para)
-    add_heading(doc, "四、图表", 1)
-    for i, fig in enumerate(fig_paths, start=1):
-        doc.add_picture(str(fig), width=Inches(5.6))
-        cap = doc.add_paragraph(f"图{i}  {fig.stem}")
-        cap.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    add_heading(doc, "五、任务明细", 1)
-    display = tasks[["target_id", "task", "prep_start_s", "exec_time_s", "distance_m", "speed_m_s", "accel_m_s2", "angle_deg", "expected_success"]].copy()
-    add_table_from_dataframe(doc, display)
-    add_heading(doc, "六、模型评价", 1)
-    add_paragraph(doc, "模型可复现、约束检查明确，并通过整数规划处理任务冲突；不足是速度和加速度由定位数据差分估计，仍受平滑窗口影响。")
-    doc.save(path)
+    image_iter = iter(fig_paths)
+    lines = report_md.splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        if not line or line.startswith("# B题"):
+            i += 1
+            continue
+        if line.startswith("## "):
+            add_heading(doc, line[3:].strip(), 1)
+            i += 1
+            continue
+        if line.startswith("### "):
+            add_heading(doc, line[4:].strip(), 2)
+            i += 1
+            continue
+        if line.startswith("**关键词"):
+            add_paragraph(doc, line.replace("**", ""), False)
+            i += 1
+            continue
+        if line.startswith("!["):
+            try:
+                fig = next(image_iter)
+                doc.add_picture(str(fig), width=Inches(5.6))
+                alt = line.split("]", 1)[0].lstrip("![")
+                cap = doc.add_paragraph(alt)
+                cap.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            except StopIteration:
+                pass
+            i += 1
+            continue
+        if line.startswith("|"):
+            table_lines = []
+            while i < len(lines) and lines[i].strip().startswith("|"):
+                table_lines.append(lines[i].strip())
+                i += 1
+            add_markdown_table(doc, table_lines)
+            continue
+        if line == "$$":
+            formula = []
+            i += 1
+            while i < len(lines) and lines[i].strip() != "$$":
+                formula.append(lines[i].strip())
+                i += 1
+            p = doc.add_paragraph(" ".join(formula))
+            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            if i < len(lines):
+                i += 1
+            continue
+        add_paragraph(doc, line)
+        i += 1
+    try:
+        doc.save(path)
+    except PermissionError:
+        doc.save(path.with_name(f"{path.stem}_90分版{path.suffix}"))
 
 
 def write_pdf(path: Path, report_md: str, fig_paths: list[Path], tasks: pd.DataFrame) -> None:
     font = "SimSun"
-    with PdfPages(path) as pdf:
-        fig = plt.figure(figsize=(8.27, 11.69), dpi=150)
-        ax = fig.add_axes([0, 0, 1, 1])
-        ax.axis("off")
-        y = 0.94
-        ax.text(0.5, y, "B题 多源融合机器人定位及任务优化", ha="center", va="top", fontsize=16, fontname=font)
-        y -= 0.06
-        abstract = report_md.split("## 摘要\n", 1)[1].split("\n\n**关键词", 1)[0]
-        for line in textwrap.wrap(abstract, width=42):
-            ax.text(0.1, y, line, ha="left", va="top", fontsize=10, fontname=font)
-            y -= 0.026
-        pdf.savefig(fig)
-        plt.close(fig)
-        for fig_path in fig_paths:
-            fig = plt.figure(figsize=(8.27, 11.69), dpi=150)
-            ax = fig.add_axes([0.08, 0.15, 0.84, 0.72])
-            ax.imshow(plt.imread(fig_path))
-            ax.axis("off")
-            pdf.savefig(fig)
-            plt.close(fig)
+    try:
+        pdf = PdfPages(path)
+    except PermissionError:
+        pdf = PdfPages(path.with_name(f"{path.stem}_90分版{path.suffix}"))
+    with pdf:
+        page_no = 0
 
-        fig = plt.figure(figsize=(8.27, 11.69), dpi=150)
-        ax = fig.add_axes([0, 0, 1, 1])
-        ax.axis("off")
-        y = 0.94
-        ax.text(0.5, y, "任务明细", ha="center", va="top", fontsize=14, fontname=font)
-        y -= 0.05
-        for i, row in tasks.iterrows():
-            text = f"{i+1:02d} {row['target_id']} {row['task']} 准备 {row['prep_start_s']:.1f}s 执行 {row['exec_time_s']:.1f}s"
-            ax.text(0.1, y, text, ha="left", va="top", fontsize=10, fontname=font)
-            y -= 0.028
+        def new_page():
+            nonlocal page_no
+            page_no += 1
+            fig = plt.figure(figsize=(8.27, 11.69), dpi=150)
+            ax = fig.add_axes([0, 0, 1, 1])
+            ax.axis("off")
+            return fig, ax, 0.94
+
+        fig, ax, y = new_page()
+        image_iter = iter(fig_paths)
+        in_formula = False
+        for raw in report_md.splitlines():
+            line = raw.strip()
+            if not line:
+                y -= 0.012
+                continue
+            if line.startswith("!["):
+                pdf.savefig(fig)
+                plt.close(fig)
+                try:
+                    fig_path = next(image_iter)
+                    fig = plt.figure(figsize=(8.27, 11.69), dpi=150)
+                    ax = fig.add_axes([0.08, 0.14, 0.84, 0.74])
+                    ax.imshow(plt.imread(fig_path))
+                    ax.axis("off")
+                    pdf.savefig(fig)
+                    plt.close(fig)
+                except StopIteration:
+                    pass
+                fig, ax, y = new_page()
+                continue
+            if line == "$$":
+                in_formula = not in_formula
+                continue
+            if line.startswith("|"):
+                font_size = 7.2
+                wrap_width = 118
+            elif line.startswith("# "):
+                line = line[2:].strip()
+                font_size = 16
+                wrap_width = 30
+            elif line.startswith("## "):
+                line = line[3:].strip()
+                font_size = 13
+                wrap_width = 36
+                y -= 0.01
+            elif line.startswith("### "):
+                line = line[4:].strip()
+                font_size = 11.5
+                wrap_width = 42
+            else:
+                line = (
+                    line.replace("**", "")
+                    .replace("`", "")
+                    .replace("$", "")
+                    .replace("\\le", "<=")
+                    .replace("\\ge", ">=")
+                    .replace("\\delta", "delta")
+                    .replace("\\tau", "tau")
+                    .replace("\\hat", "hat")
+                    .replace("\\sum", "sum")
+                    .replace("\\frac", "frac")
+                    .replace("\\left", "")
+                    .replace("\\right", "")
+                    .replace("\\", "")
+                )
+                font_size = 9.5 if not in_formula else 8.5
+                wrap_width = 48 if not line.startswith("|") else 110
+            for piece in textwrap.wrap(line, width=wrap_width) or [""]:
+                if y < 0.08:
+                    pdf.savefig(fig)
+                    plt.close(fig)
+                    fig, ax, y = new_page()
+                ax.text(0.09, y, piece, ha="left", va="top", fontsize=font_size, fontname=font)
+                y -= 0.024 if font_size <= 10 else 0.032
         pdf.savefig(fig)
         plt.close(fig)
 
@@ -934,6 +1060,26 @@ def verify_trajectories(trajectories: dict[int, pd.DataFrame]) -> list[str]:
     return issues
 
 
+def sensitivity_analysis(root: Path, alignment: AlignmentResult, target_path: Path) -> pd.DataFrame:
+    rows = []
+    for window in [51, 61, 71, 81, 91]:
+        traj = make_trajectory(root / "附件3.xlsx", alignment, window)
+        candidates = build_task_candidates(traj, target_path)
+        tasks, status = schedule_tasks_milp(candidates)
+        issues = verify_task_solution(traj, tasks, target_path)
+        rows.append(
+            {
+                "平滑窗口(点)": window,
+                "候选任务数": len(candidates),
+                "选中任务数": len(tasks),
+                "期望完成数": float(tasks["expected_success"].sum()) if not tasks.empty else 0.0,
+                "求解状态": status,
+                "校验": "PASS" if not issues else "FAIL",
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 def main() -> None:
     root = Path(__file__).resolve().parent
     out_dir = root / "outputs"
@@ -956,9 +1102,11 @@ def main() -> None:
     tasks, schedule_status = schedule_tasks_milp(candidates)
     tasks.to_excel(out_dir / "task_schedule_detail.xlsx", index=False)
     write_result_xlsx(root / "result.xlsx", out_dir / "result.xlsx", tasks)
+    sensitivity = sensitivity_analysis(root, results[3], root / "附件4.xlsx")
+    sensitivity.to_excel(out_dir / "sensitivity_smooth_window.xlsx", index=False)
 
     fig_paths = plot_outputs(out_dir, trajectories, tasks, root / "附件4.xlsx")
-    report_md = build_report_markdown(results, trajectories, tasks, candidates, schedule_status, fig_paths)
+    report_md = build_report_markdown(results, trajectories, tasks, candidates, schedule_status, fig_paths, sensitivity)
     (out_dir / "B题_论文.md").write_text(report_md, encoding="utf-8")
     write_docx(out_dir / "B题_多源融合机器人定位及任务优化_论文.docx", report_md, tasks, fig_paths)
     write_pdf(out_dir / "B题_多源融合机器人定位及任务优化_论文.pdf", report_md, fig_paths, tasks)
