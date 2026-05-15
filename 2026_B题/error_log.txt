@@ -1,0 +1,40 @@
+Traceback (most recent call last):
+  File "F:/数学建模/2026_B题/solve_b_from_scratch.py", line 1148, in <module>
+    main()
+    ~~~~^^
+  File "F:/数学建模/2026_B题/solve_b_from_scratch.py", line 1128, in main
+    write_docx(out_dir / "B题_多源融合机器人定位及任务优化_论文.docx", report_md, tasks, fig_paths)
+    ~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:/数学建模/2026_B题/solve_b_from_scratch.py", line 924, in write_docx
+    add_paragraph(doc, line)
+    ~~~~~~~~~~~~~^^^^^^^^^^^
+  File "F:/数学建模/2026_B题/solve_b_from_scratch.py", line 832, in add_paragraph
+    run = p.add_run(text)
+  File "F:/c_and_cpp/ucrt64/lib/python3.13/site-packages/docx/text/paragraph.py", line 41, in add_run
+    run.text = text
+    ^^^^^^^^
+  File "F:/c_and_cpp/ucrt64/lib/python3.13/site-packages/docx/text/run.py", line 225, in text
+    self._r.text = text
+    ^^^^^^^^^^^^
+  File "F:/c_and_cpp/ucrt64/lib/python3.13/site-packages/docx/oxml/text/run.py", line 143, in text
+    _RunContentAppender.append_to_run_from_text(self, text)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^
+  File "F:/c_and_cpp/ucrt64/lib/python3.13/site-packages/docx/oxml/text/run.py", line 279, in append_to_run_from_text
+    appender.add_text(text)
+    ~~~~~~~~~~~~~~~~~^^^^^^
+  File "F:/c_and_cpp/ucrt64/lib/python3.13/site-packages/docx/oxml/text/run.py", line 285, in add_text
+    self.flush()
+    ~~~~~~~~~~^^
+  File "F:/c_and_cpp/ucrt64/lib/python3.13/site-packages/docx/oxml/text/run.py", line 306, in flush
+    self._r.add_t(text)
+    ~~~~~~~~~~~~~^^^^^^
+  File "F:/c_and_cpp/ucrt64/lib/python3.13/site-packages/docx/oxml/text/run.py", line 42, in add_t
+    t = self._add_t(text=text)
+  File "F:/c_and_cpp/ucrt64/lib/python3.13/site-packages/docx/oxml/xmlchemy.py", line 288, in _add_child
+    setattr(child, key, value)
+    ~~~~~~~^^^^^^^^^^^^^^^^^^^
+  File "src/lxml/etree.pyx", line 1163, in lxml.etree._Element.text.__set__
+  File "src/lxml/apihelpers.pxi", line 749, in lxml.etree._setNodeText
+  File "src/lxml/apihelpers.pxi", line 737, in lxml.etree._createTextNode
+  File "src/lxml/apihelpers.pxi", line 1538, in lxml.etree._utf8
+ValueError: All strings must be XML compatible: Unicode or ASCII, no NULL bytes or control characters
