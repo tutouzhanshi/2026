@@ -558,7 +558,11 @@ def write_result_xlsx(template: Path, output: Path, tasks: pd.DataFrame) -> None
     wb = load_workbook(output)
     ws = wb.active
     data_start = 2
-    if ws.cell(data_start, 1).value and "注意" in str(ws.cell(data_start, 1).value):
+    note_found = any(
+        ws.cell(data_start, c).value and "注意" in str(ws.cell(data_start, c).value)
+        for c in range(1, 6)
+    )
+    if note_found:
         data_start = 4
     for r in range(data_start, max(ws.max_row + 1, len(tasks) + data_start)):
         for c in range(1, 6):
