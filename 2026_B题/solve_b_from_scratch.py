@@ -61,8 +61,7 @@ PHOTO_SPEED_MAX = 1.5
 PHOTO_ACCEL_MAX = 1.5
 PHOTO_PREP = 0.5
 
-SYSTEM_BIAS_IMPROVEMENT_MIN = 0.05
-SYSTEM_BIAS_NORM_MIN = 0.50
+BIAS_TEST_ALPHA = 0.05
 
 
 @dataclass
@@ -80,7 +79,7 @@ class AlignmentResult:
     f_stat: float | None = None
     f_p_value: float | None = None
     statistical_bias: bool = False
-    practical_bias: bool = False
+    adopt_bias_correction: bool = False
     ci_delta_lo: float = 0.0
     ci_delta_hi: float = 0.0
     candidate_delta_s: float | None = None
@@ -190,7 +189,13 @@ def estimate_alignment(
     return float(opt.x), bias, mse, overlap, n
 
 
-def nested_f_test(mse0: float, mse1: float, n: int, p: int = 2) -> tuple[float, float, bool]:
+def nested_f_test(
+    mse0: float,
+    mse1: float,
+    n: int,
+    p: int = 2,
+    alpha: float = BIAS_TEST_ALPHA,
+) -> tuple[float, float, bool]:
     if mse1 <= 0 or mse0 <= mse1 or n <= p + 1:
         return 1.0, 1.0, False
     sse0 = mse0 * n
@@ -199,7 +204,7 @@ def nested_f_test(mse0: float, mse1: float, n: int, p: int = 2) -> tuple[float, 
     df2 = n - p
     f_stat = ((sse0 - sse1) / df1) / (sse1 / df2)
     p_value = float(1.0 - f_dist.cdf(f_stat, df1, df2))
-    return float(f_stat), p_value, p_value < 0.05
+    return float(f_stat), p_value, p_value < alpha
 
 
 def delta_ci_linearized(
@@ -270,7 +275,7 @@ def build_alignment_results(root: Path) -> dict[int, AlignmentResult]:
         f_stat=f2,
         f_p_value=p2,
         statistical_bias=stat2,
-        practical_bias=stat2,
+        adopt_bias_correction=stat2,
         ci_delta_lo=ci2[0],
         ci_delta_hi=ci2[1],
     )
@@ -279,9 +284,8 @@ def build_alignment_results(root: Path) -> dict[int, AlignmentResult]:
     d3_nb, _b3_nb, mse3_nb, ov3_nb, n3_nb = estimate_alignment(paths[3], False, 11, 0.05)
     imp3 = (mse3_nb - mse3_b) / mse3_nb
     f3, p3, stat3 = nested_f_test(mse3_nb, mse3_b, n3)
-    bias_norm3 = float(np.linalg.norm(b3))
-    practical3 = bool(stat3 and imp3 >= SYSTEM_BIAS_IMPROVEMENT_MIN and bias_norm3 >= SYSTEM_BIAS_NORM_MIN)
-    if practical3:
+    adopt3 = bool(stat3)
+    if adopt3:
         d3, b3_used, mse3, ov3, n3_used = d3_b, b3, mse3_b, ov3_b, n3
     else:
         d3, b3_used, mse3, ov3, n3_used = d3_nb, np.zeros(2), mse3_nb, ov3_nb, n3_nb
@@ -300,7 +304,7 @@ def build_alignment_results(root: Path) -> dict[int, AlignmentResult]:
         f_stat=f3,
         f_p_value=p3,
         statistical_bias=stat3,
-        practical_bias=practical3,
+        adopt_bias_correction=adopt3,
         ci_delta_lo=ci3[0],
         ci_delta_hi=ci3[1],
         candidate_delta_s=d3_b,
@@ -514,7 +518,7 @@ def schedule_tasks_milp(candidates: pd.DataFrame) -> tuple[pd.DataFrame, str]:
         options={"time_limit": 90, "mip_rel_gap": 0.0},
     )
     if not res.success:
-        return weighted_interval_fallback(df), f"milp_failed:{res.message}"
+        raise RuntimeError(f"MILP求解失败，不能保证任务约束全局满足：{res.message}")
     chosen = np.where(res.x > 0.5)[0]
     out = df.iloc[chosen].copy().sort_values(["prep_start_s", "exec_time_s"]).reset_index(drop=True)
     return out, "milp_optimal"
@@ -587,7 +591,7 @@ def save_estimates(path: Path, results: dict[int, AlignmentResult]) -> None:
                 "候选系统偏差_x_m": r.candidate_bias_x_m,
                 "候选系统偏差_y_m": r.candidate_bias_y_m,
                 "是否统计显著": "是" if r.statistical_bias else "否",
-                "是否采用系统偏差修正": "是" if r.practical_bias else "否",
+                "是否采用系统偏差修正": "是" if r.adopt_bias_correction else "否",
                 "F统计量": r.f_stat,
                 "F检验p值": r.f_p_value,
                 "重叠时长_s": r.overlap_s,
@@ -678,6 +682,7 @@ def build_report_markdown(
     shoot_count = int((tasks["task"] == "模拟射击").sum())
     photo_count = int((tasks["task"] == "拍照").sum())
     expected = float(tasks["expected_success"].sum())
+    r3_candidate_norm = float(math.hypot(r3.candidate_bias_x_m or 0.0, r3.candidate_bias_y_m or 0.0))
     task_md = tasks.copy()
     for col in ["prep_start_s", "exec_time_s", "distance_m", "speed_m_s", "accel_m_s2", "angle_deg", "expected_success"]:
         if col in task_md.columns:
@@ -691,7 +696,7 @@ def build_report_markdown(
 
 ## 摘要
 
-针对两种异频异步定位方式，本文建立“时间平移—固定偏差估计—10Hz重采样融合”的多源定位模型。问题1在无噪声条件下，以方式1为基准得到方式2相对时间偏差为 {r1.delta_s:.4f}s，时间平移后两轨迹均方残差接近0。问题2在随机噪声和固定系统偏差并存条件下，估计方式2相对时间偏差为 {r2.delta_s:.4f}s，95%置信区间为 [{r2.ci_delta_lo:.4f},{r2.ci_delta_hi:.4f}]s，方式2相对方式1的固定坐标偏差为 ({r2.bias_x_m:.4f},{r2.bias_y_m:.4f})m。问题3实测数据中，带偏差模型候选偏差为 ({r3.candidate_bias_x_m:.4f},{r3.candidate_bias_y_m:.4f})m，误差下降比例为 {100*r3.improvement_ratio:.2f}%；尽管大样本F检验可检出微小均值漂移（F={r3.f_stat:.2f}, p={r3.f_p_value:.4g}），但其幅值和误差改善均低于工程效应量阈值，因此不采用固定系统偏差修正。问题4在附件3融合轨迹上生成可行任务候选，并用0-1整数规划最大化期望完成数，得到 {len(tasks)} 项非重叠任务，其中模拟射击 {shoot_count} 项、拍照 {photo_count} 项，期望完成数为 {expected:.2f}。全部任务满足距离、速度、加速度、准备时间和拍照角度约束。
+针对两种异频异步定位方式，本文建立“时间平移—固定偏差估计—10Hz重采样融合”的多源定位模型。问题1在无噪声条件下，以方式1为基准得到方式2相对时间偏差为 {r1.delta_s:.4f}s，时间平移后两轨迹均方残差接近0。问题2在随机噪声和固定系统偏差并存条件下，估计方式2相对时间偏差为 {r2.delta_s:.4f}s，95%置信区间为 [{r2.ci_delta_lo:.4f},{r2.ci_delta_hi:.4f}]s，方式2相对方式1的固定坐标偏差为 ({r2.bias_x_m:.4f},{r2.bias_y_m:.4f})m。问题3实测数据中，带偏差模型估计方式2相对方式1的固定坐标偏差为 ({r3.bias_x_m:.4f},{r3.bias_y_m:.4f})m，偏差模长约 {r3_candidate_norm:.4f}m，误差下降比例为 {100*r3.improvement_ratio:.2f}%；嵌套F检验拒绝“无固定偏差”假设（F={r3.f_stat:.2f}, p={r3.f_p_value:.4g}），因此判定存在统计显著的微小系统偏差，并据此修正10Hz融合轨迹。问题4在附件3修正融合轨迹上生成可行任务候选，并用0-1整数规划最大化期望完成数，得到 {len(tasks)} 项非重叠任务，其中模拟射击 {shoot_count} 项、拍照 {photo_count} 项，期望完成数为 {expected:.2f}。全部任务满足距离、速度、加速度、准备时间和拍照角度约束。
 
 **关键词：** 多源定位；时间同步；系统偏差；10Hz重采样；整数规划；任务优化
 
@@ -727,7 +732,7 @@ $$
 J_1(\\delta)=\\frac1n\\sum_t \\|q_2(t-\\delta)-q_1(t)-\\hat b(\\delta)\\|^2 .
 $$
 
-实际求解时先在允许区间内粗搜索，再用有界一维优化细化 $\\delta$。对问题2、问题3，本文比较无偏模型和带偏模型的残差平方和，采用嵌套模型F检验判断固定偏差项是否具有统计显著性。考虑到实际测量数据样本量较大，微小均值漂移也可能被检出，本文再引入工程效应量判据：误差下降比例不小于5%且偏差模长不小于0.5m时，才采用固定偏差修正。这样可以避免把随机噪声或微小漂移解释成需要修正的系统误差。
+实际求解时先在允许区间内粗搜索，再用有界一维优化细化 $\\delta$。对问题2、问题3，本文比较无偏模型和带偏模型的残差平方和，采用嵌套模型F检验判断固定偏差项是否具有统计显著性，显著性水平取 $\\alpha=0.05$。若检验显著，则按题意判定存在固定系统偏差，并在10Hz轨迹融合中采用估计偏差进行坐标修正；同时报告误差下降比例和偏差模长，用于说明该偏差的工程影响大小。
 
 时间偏差置信区间采用残差重采样的线性化估计。对最优解附近，$\\delta$ 的微小变化等价于沿方式2局部速度方向扰动轨迹，因此可由重采样残差和局部速度的最小二乘关系得到 $\\delta$ 的扰动分布，并取2.5%和97.5%分位数作为95%置信区间。
 
@@ -767,7 +772,7 @@ $$
 |---|---:|---:|---:|---:|---:|---:|---:|---|
 | 1 | {r1.delta_s:.4f} | -- | 0 | 0 | -- | -- | -- | 无 |
 | 2 | {r2.delta_s:.4f} | [{r2.ci_delta_lo:.4f},{r2.ci_delta_hi:.4f}] | {r2.bias_x_m:.4f} | {r2.bias_y_m:.4f} | {r2.bias_x_m:.4f} | {r2.bias_y_m:.4f} | {100*r2.improvement_ratio:.2f}% | 存在并修正 |
-| 3 | {r3.delta_s:.4f} | [{r3.ci_delta_lo:.4f},{r3.ci_delta_hi:.4f}] | 0 | 0 | {r3.candidate_bias_x_m:.4f} | {r3.candidate_bias_y_m:.4f} | {100*r3.improvement_ratio:.2f}% | 工程量级不足，不修正 |
+| 3 | {r3.delta_s:.4f} | [{r3.ci_delta_lo:.4f},{r3.ci_delta_hi:.4f}] | {r3.bias_x_m:.4f} | {r3.bias_y_m:.4f} | {r3.candidate_bias_x_m:.4f} | {r3.candidate_bias_y_m:.4f} | {100*r3.improvement_ratio:.2f}% | 存在微小系统偏差，已修正 |
 
 ### 6.2 分题轨迹图
 
@@ -797,7 +802,7 @@ $$
 
 ## 8 模型评价
 
-模型优点是参数含义清晰、数据驱动且可复现；时间对齐采用重叠时长约束和截尾误差，能降低噪声与局部异常点影响；系统偏差判定同时考虑统计显著性和工程效应量，避免过度修正；问题4用0-1整数规划统一处理时间互斥、射击唯一性和拍照角度冲突，比简单贪心更稳健。局限在于速度和加速度由定位轨迹差分得到，受平滑窗口影响；任务优化是在10Hz离散轨迹上的最优解，若需要连续时间全局最优，可进一步建立更细粒度的混合整数规划。
+模型优点是参数含义清晰、数据驱动且可复现；时间对齐采用重叠时长约束和截尾误差，能降低噪声与局部异常点影响；系统偏差判定以嵌套F检验回答“是否存在”，并用效应量说明偏差影响大小；问题4用0-1整数规划统一处理时间互斥、射击唯一性和拍照角度冲突，比简单贪心更稳健。局限在于速度和加速度由定位轨迹差分得到，受平滑窗口影响；任务优化是在10Hz离散轨迹上的最优解，若需要连续时间全局最优，可进一步建立更细粒度的混合整数规划。
 
 ## 参考文献
 
@@ -1121,7 +1126,7 @@ def main() -> None:
         r = results[i]
         print(
             f"问题{i}: delta={r.delta_s:.6f}s, bias=({r.bias_x_m:.6f},{r.bias_y_m:.6f})m, "
-            f"stat_bias={r.statistical_bias}, practical_bias={r.practical_bias}"
+            f"stat_bias={r.statistical_bias}, adopt_bias_correction={r.adopt_bias_correction}"
         )
     print(f"候选任务数={len(candidates)}, 选中任务数={len(tasks)}, 期望完成数={tasks['expected_success'].sum():.2f}, 调度状态={schedule_status}")
     print("校验：", "PASS" if not issues else issues)
