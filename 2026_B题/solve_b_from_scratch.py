@@ -604,48 +604,101 @@ def save_estimates(path: Path, results: dict[int, AlignmentResult]) -> None:
     pd.DataFrame(rows).to_excel(path, index=False)
 
 
+def nice_tick_step(span: float) -> float:
+    """Return a readable tick interval for a square, equal-scale plot."""
+    if span <= 0:
+        return 1.0
+    raw = span / 8.0
+    magnitude = 10 ** math.floor(math.log10(raw))
+    for factor in (1.0, 2.0, 5.0, 10.0):
+        step = factor * magnitude
+        if raw <= step:
+            return step
+    return 10.0 * magnitude
+
+
+def set_equal_scale_axis(ax, x_values: Iterable[float], y_values: Iterable[float], *, pad_ratio: float = 0.035) -> None:
+    """Use the same [lower, upper] numeric range on x/y axes with small padding."""
+    x = np.asarray(list(x_values), dtype=float)
+    y = np.asarray(list(y_values), dtype=float)
+    x = x[np.isfinite(x)]
+    y = y[np.isfinite(y)]
+    if len(x) == 0 or len(y) == 0:
+        ax.set_aspect("equal", adjustable="box")
+        return
+
+    x_min, x_max = float(x.min()), float(x.max())
+    y_min, y_max = float(y.min()), float(y.max())
+
+    lower = min(x_min, y_min)
+    upper = max(x_max, y_max)
+    span = max(upper - lower, 1.0)
+    pad = span * pad_ratio
+    lower -= pad
+    upper += pad
+    step = nice_tick_step(upper - lower)
+
+    ax.set_xlim(lower, upper)
+    ax.set_ylim(lower, upper)
+    ax.set_aspect("equal", adjustable="box")
+
+    x_lo, x_hi = ax.get_xlim()
+    y_lo, y_hi = ax.get_ylim()
+    x_ticks = np.arange(math.ceil(x_lo / step) * step, x_hi + 0.5 * step, step)
+    y_ticks = np.arange(math.ceil(y_lo / step) * step, y_hi + 0.5 * step, step)
+    ax.set_xticks(x_ticks)
+    ax.set_yticks(y_ticks)
+    ax.grid(True, linestyle="-", linewidth=0.35, alpha=0.28)
+    for spine in ax.spines.values():
+        spine.set_linewidth(0.9)
+
+
 def plot_outputs(out_dir: Path, trajectories: dict[int, pd.DataFrame], tasks: pd.DataFrame, target_path: Path) -> list[Path]:
     fig_dir = out_dir / "figures"
     fig_dir.mkdir(parents=True, exist_ok=True)
     paths: list[Path] = []
     for i, df in trajectories.items():
-        plt.figure(figsize=(7.0, 5.2), dpi=180)
-        plt.plot(df["x_m"], df["y_m"], color="#1f77b4", linewidth=1.4, label="10Hz融合轨迹")
-        plt.scatter(df["x_m"].iloc[0], df["y_m"].iloc[0], color="#2ca02c", marker="o", s=36, label="起点")
-        plt.scatter(df["x_m"].iloc[-1], df["y_m"].iloc[-1], color="#d62728", marker="s", s=36, label="终点")
-        plt.axis("equal")
-        plt.xlabel("X / m")
-        plt.ylabel("Y / m")
-        plt.title(f"问题{i}：10Hz融合轨迹")
-        plt.legend(fontsize=8)
-        plt.tight_layout()
+        fig, ax = plt.subplots(figsize=(6.2, 6.2), dpi=220)
+        x = df["x_m"].to_numpy(float)
+        y = df["y_m"].to_numpy(float)
+        ax.plot(x, y, color="#1f77b4", linewidth=1.35, label="10Hz融合轨迹")
+        mark_stride = max(1, len(df) // 260)
+        ax.plot(x[::mark_stride], y[::mark_stride], "o", color="#1f77b4", markersize=1.8, alpha=0.78, label="采样点")
+        ax.scatter(x[0], y[0], color="#2ca02c", marker="o", s=44, label="起点", zorder=4)
+        ax.scatter(x[-1], y[-1], color="#d62728", marker="s", s=44, label="终点", zorder=4)
+        set_equal_scale_axis(ax, x, y)
+        ax.set_xlabel("x / m")
+        ax.set_ylabel("y / m")
+        ax.legend(fontsize=8, loc="best", frameon=True)
+        fig.tight_layout()
         p = fig_dir / f"problem{i}_trajectory_10hz.png"
-        plt.savefig(p)
-        plt.close()
+        fig.savefig(p, bbox_inches="tight")
+        plt.close(fig)
         paths.append(p)
 
     shots = pd.read_excel(target_path, sheet_name=0).dropna().iloc[:, 0:3]
     photos = pd.read_excel(target_path, sheet_name=1).dropna().iloc[:, 0:3]
     tr3 = trajectories[3]
-    plt.figure(figsize=(7.0, 5.2), dpi=180)
-    plt.plot(tr3["x_m"], tr3["y_m"], color="#1f77b4", linewidth=1.2, label="附件3融合轨迹")
-    plt.scatter(shots.iloc[:, 1], shots.iloc[:, 2], marker="x", color="#d62728", label="射击目标")
-    plt.scatter(photos.iloc[:, 1], photos.iloc[:, 2], marker="o", facecolors="none", edgecolors="#2ca02c", label="拍照目标")
+    fig, ax = plt.subplots(figsize=(6.4, 6.4), dpi=220)
+    ax.plot(tr3["x_m"], tr3["y_m"], color="#1f77b4", linewidth=1.2, label="附件3融合轨迹")
+    ax.scatter(shots.iloc[:, 1], shots.iloc[:, 2], marker="x", color="#d62728", label="射击目标")
+    ax.scatter(photos.iloc[:, 1], photos.iloc[:, 2], marker="o", facecolors="none", edgecolors="#2ca02c", label="拍照目标")
     for _, row in tasks.iterrows():
         target_df = shots if row["task"] == "模拟射击" else photos
         hit = target_df[target_df.iloc[:, 0].astype(str) == str(row["target_id"])]
         if not hit.empty:
             color = "#d62728" if row["task"] == "模拟射击" else "#2ca02c"
-            plt.scatter(hit.iloc[:, 1], hit.iloc[:, 2], s=90, facecolors="none", edgecolors=color, linewidths=2.2)
-    plt.axis("equal")
-    plt.xlabel("X / m")
-    plt.ylabel("Y / m")
-    plt.title("问题4：选中任务目标")
-    plt.legend(fontsize=8)
-    plt.tight_layout()
+            ax.scatter(hit.iloc[:, 1], hit.iloc[:, 2], s=90, facecolors="none", edgecolors=color, linewidths=2.2)
+    all_x = np.r_[tr3["x_m"].to_numpy(float), shots.iloc[:, 1].to_numpy(float), photos.iloc[:, 1].to_numpy(float)]
+    all_y = np.r_[tr3["y_m"].to_numpy(float), shots.iloc[:, 2].to_numpy(float), photos.iloc[:, 2].to_numpy(float)]
+    set_equal_scale_axis(ax, all_x, all_y)
+    ax.set_xlabel("x / m")
+    ax.set_ylabel("y / m")
+    ax.legend(fontsize=8, loc="best", frameon=True)
+    fig.tight_layout()
     p = fig_dir / "problem4_selected_tasks.png"
-    plt.savefig(p)
-    plt.close()
+    fig.savefig(p, bbox_inches="tight")
+    plt.close(fig)
     paths.append(p)
     return paths
 
