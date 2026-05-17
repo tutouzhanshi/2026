@@ -2,5 +2,3 @@ pandas
 numpy
 scipy
 openpyxl
-matplotlib
-python-docx
